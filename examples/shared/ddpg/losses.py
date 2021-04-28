@@ -15,7 +15,7 @@ class LossFunction(object):
         return self._losses
 
     def __call__(self, yhat, y):
-        loss = F.smooth_l1_loss(yhat, y, reduce=False)
+        loss = F.smooth_l1_loss(yhat, y, reduction='none')
 
         if self._need_log():
             temp_losses = list()
