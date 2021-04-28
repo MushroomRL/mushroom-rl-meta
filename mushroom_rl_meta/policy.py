@@ -79,7 +79,7 @@ class EpsGreedyMultiple(Multiple):
         return np.array([np.random.choice(self._n_actions_per_head[idx][0])])
 
 
-class OrnsteinUhlenbeckPolicy(ParametricPolicy):
+class OrnsteinUhlenbeckPolicyMultiple(ParametricPolicy):
     def __init__(self, mu, sigma, theta, dt, n_actions_per_head,
                  max_action_value, x0=None):
 

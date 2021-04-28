@@ -60,10 +60,6 @@ def experiment(args, results_dir, seed):
     mdp_info = MDPInfo(mdp[max_obs_idx].info.observation_space,
                        mdp[max_act_idx].info.action_space, gammas, horizons)
 
-    scores = list()
-    for _ in range(len(args.games)):
-        scores.append(list())
-
     optimizer = dict()
     if args.optimizer == 'adam':
         optimizer['class'] = optim.Adam
@@ -196,11 +192,11 @@ def experiment(args, results_dir, seed):
                             quiet=args.quiet)
 
     results_dict = dict()
+    current_score = np.zeros(len(mdp))
     for i in range(len(mdp)):
         d = dataset[i::len(mdp)]
-        current_score = np.mean(compute_J(d, gamma_eval[i]))
-        scores[i].append(current_score)
-        results_dict[args.games[i]] = current_score
+        current_score[i] = np.mean(compute_J(d, gamma_eval[i]))
+        results_dict[args.games[i]] = current_score[i]
     logger.epoch_info(0, **results_dict)
 
     if args.unfreeze_epoch > 0:
@@ -209,7 +205,7 @@ def experiment(args, results_dir, seed):
     best_score_sum = -np.inf
     best_weights = None
 
-    logger.log_numpy(J=scores, loss=agent.approximator.model._loss.get_losses())
+    logger.log_numpy(J=current_score, loss=agent.approximator.model._loss.get_losses())
 
     for n_epoch in range(1, max_steps // evaluation_frequency + 1):
         if n_epoch >= args.unfreeze_epoch > 0:
@@ -228,12 +224,12 @@ def experiment(args, results_dir, seed):
         current_score_sum = 0
         results_dict = dict()
 
+        current_score = np.zeros(len(mdp))
         for i in range(len(mdp)):
             d = dataset[i::len(mdp)]
-            current_score = np.mean(compute_J(d, gamma_eval[i]))
-            scores[i].append(current_score)
-            results_dict[args.games[i]] = current_score
-            current_score_sum += current_score
+            current_score[i] = np.mean(compute_J(d, gamma_eval[i]))
+            results_dict[args.games[i]] = current_score[i]
+        current_score_sum = np.sum(current_score)
         logger.epoch_info(n_epoch, **results_dict)
 
         # Save shared weights if best score
@@ -244,12 +240,10 @@ def experiment(args, results_dir, seed):
         if args.save:
             logger.log_numpy(weights=agent.approximator.get_weights())
 
-        logger.log_numpy(J=scores, loss=agent.approximator.model._loss.get_losses())
+        logger.log_numpy(J=current_score, loss=agent.approximator.model._loss.get_losses())
 
     if args.save_shared:
         pickle.dump(best_weights, open(args.save_shared, 'wb'))
-
-    return scores, agent.approximator.model._loss.get_losses()
 
 
 def parse_arguments():
@@ -369,11 +363,4 @@ if __name__ == '__main__':
     with open(folder_name + 'args.pkl', 'wb') as f:
         pickle.dump(args, f)
 
-    out = Parallel(n_jobs=1)(delayed(experiment)(args, folder_name, i)
-                             for i in range(args.n_exp))
-
-    scores = np.array([o[0] for o in out])
-    loss = np.array([o[1] for o in out])
-
-    np.save(folder_name + 'scores.npy', scores)
-    np.save(folder_name + 'loss.npy', loss)
+    Parallel(n_jobs=4)(delayed(experiment)(args, folder_name, i) for i in range(args.n_exp))

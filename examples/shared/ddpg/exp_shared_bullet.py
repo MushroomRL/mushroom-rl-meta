@@ -9,30 +9,24 @@ import torch.optim as optim
 
 import pickle
 
+from mushroom_rl.core import Logger
+from mushroom_rl.environments import Gym, MDPInfo
 from mushroom_rl.approximators.parametric import TorchApproximator
-from mushroom_rl.environments import *
 from mushroom_rl.utils.dataset import compute_J
 
 from mushroom_rl_meta.core import MultitaskCore
 from mushroom_rl_meta.algorithms import SharedDDPG
-from mushroom_rl_meta.policy import OrnsteinUhlenbeckPolicy
+from mushroom_rl_meta.policy import OrnsteinUhlenbeckPolicyMultiple
 
 from networks import ActorNetwork, CriticNetwork
 from losses import LossFunction
 
 
 
-def experiment(idx, args):
+def experiment(args, results_dir, seed):
     np.random.seed()
 
-    args.games = [''.join(g) for g in args.games]
-
-    domains = args.games[::2]
-    tasks = args.games[1::2]
-
-    scores = list()
-    for _ in range(len(domains)):
-        scores.append(list())
+    domains = [''.join(g) for g in args.games]
 
     optimizer_actor = dict()
     optimizer_actor['class'] = optim.Adam
@@ -46,11 +40,11 @@ def experiment(idx, args):
     # MDP
     mdp = list()
     gamma_eval = list()
-    for i, g in enumerate(zip(domains, tasks)):
-        mdp.append(DMControl(g[0], g[1], args.horizon[i], args.gamma[i]))
+    for i, g in enumerate(domains):
+        mdp.append(Gym(g, args.horizon[i], args.gamma[i]))
         gamma_eval.append(args.gamma[i])
     if args.render:
-        mdp[0].render()
+        mdp[0].render(mode='human')
 
     n_input_per_mdp = [m.info.observation_space.shape for m in mdp]
     n_actions_per_head = [(m.info.action_space.shape[0],) for m in mdp]
@@ -95,7 +89,7 @@ def experiment(idx, args):
         max_steps = args.max_steps
 
     # Policy
-    policy_class = OrnsteinUhlenbeckPolicy
+    policy_class = OrnsteinUhlenbeckPolicyMultiple
     policy_params = dict(sigma=np.ones(1) * .2, theta=.15, dt=1e-2,
                          n_actions_per_head=n_actions_per_head,
                          max_action_value=max_action_value)
@@ -149,16 +143,19 @@ def experiment(idx, args):
         dtype=np.float32
     )
 
-    agent = DDPG(actor_approximator, critic_approximator, policy_class,
-                 mdp_info, **algorithm_params)
+    alg = SharedDDPG
+    agent = alg(actor_approximator, critic_approximator, policy_class,
+                mdp_info, **algorithm_params)
 
     # Algorithm
-    core = Core(agent, mdp)
+    core = MultitaskCore(agent, mdp)
 
     # RUN
+    logger = Logger(alg.__name__, seed=seed, results_dir=results_dir)
+    logger.strong_line()
+    logger.info('Experiment Algorithm: ' + alg.__name__)
 
     # Fill replay memory with random dataset
-    print_epoch(0)
     core.learn(n_steps=initial_replay_size,
                n_steps_per_fit=initial_replay_size, quiet=args.quiet)
 
@@ -175,9 +172,15 @@ def experiment(idx, args):
     dataset = core.evaluate(n_steps=test_samples, render=args.render,
                             quiet=args.quiet)
     agent.policy.eval = False
+
+    results_dict = dict()
+    current_score = np.zeros(len(mdp))
     for i in range(len(mdp)):
         d = dataset[i::len(mdp)]
-        scores[i].append(get_stats(d, gamma_eval, i, domains, tasks))
+        current_score[i] = np.mean(compute_J(d, gamma_eval[i]))
+        results_dict[domains[i]] = current_score[i]
+
+    logger.epoch_info(0, **results_dict)
 
     if args.unfreeze_epoch > 0:
         agent.freeze_shared_weights()
@@ -185,14 +188,12 @@ def experiment(idx, args):
     best_score_sum = -np.inf
     best_weights = None
 
-    np.save(folder_name + 'scores-exp-%d.npy' % idx, scores)
-    np.save(folder_name + 'critic_loss-exp-%d.npy' % idx,
-            agent._critic_approximator.model._loss.get_losses())
+    logger.log_numpy(J=current_score, critic_loss=agent._critic_approximator.model._loss.get_losses())
+
     for n_epoch in range(1, max_steps // evaluation_frequency + 1):
         if n_epoch >= args.unfreeze_epoch > 0:
             agent.unfreeze_shared_weights()
 
-        print_epoch(n_epoch)
         print('- Learning:')
         # learning step
         core.learn(n_steps=evaluation_frequency,
@@ -205,12 +206,15 @@ def experiment(idx, args):
                                 render=args.render, quiet=args.quiet)
         agent.policy.eval = False
 
-        current_score_sum = 0
+        results_dict = dict()
+        current_score = np.zeros(len(mdp))
         for i in range(len(mdp)):
             d = dataset[i::len(mdp)]
-            current_score = get_stats(d, gamma_eval, i, domains, tasks)
-            scores[i].append(current_score)
-            current_score_sum += current_score
+            current_score[i] = np.mean(compute_J(d, gamma_eval[i]))
+            results_dict[domains[i]] = current_score[i]
+        current_score_sum = np.sum(current_score)
+
+        logger.epoch_info(n_epoch, **results_dict)
 
         # Save shared weights if best score
         if args.save_shared and current_score_sum >= best_score_sum:
@@ -218,26 +222,20 @@ def experiment(idx, args):
             best_weights = agent.get_shared_weights()
 
         if args.save:
-            np.save(folder_name + 'best_weights-exp-%d.npy' % idx,
-                    agent.policy.get_weights())
+            logger.log_numpy(weights=agent.policy.get_weights())
 
-        np.save(folder_name + 'scores-exp-%d.npy' % idx, scores)
-        np.save(folder_name + 'critic_loss-exp-%d.npy' % idx,
-                agent._critic_approximator.model._loss.get_losses())
+        logger.log_numpy(J=current_score, critic_loss=agent._critic_approximator.model._loss.get_losses())
 
     if args.save_shared:
         pickle.dump(best_weights, open(args.save_shared, 'wb'))
 
-    return scores, agent._critic_approximator.model._loss.get_losses()
 
-
-if __name__ == '__main__':
-    # Argument parser
+def parse_arguments():
     parser = argparse.ArgumentParser()
 
     arg_game = parser.add_argument_group('Game')
     arg_game.add_argument("--games", type=list, nargs='+',
-                          default=['cartpole', 'swingup'])
+                          default=['AntBulletEnv-v0'])
     arg_game.add_argument("--horizon", type=int, nargs='+')
     arg_game.add_argument("--gamma", type=float, nargs='+')
     arg_game.add_argument("--n-exp", type=int)
@@ -300,18 +298,17 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    folder_name = './logs/mujoco_' + datetime.datetime.now().strftime(
+    return args
+
+
+if __name__ == '__main__':
+    # Argument parser
+    args = parse_arguments()
+
+    folder_name = './logs/bullet_' + datetime.datetime.now().strftime(
         '%Y-%m-%d_%H-%M-%S') + args.postfix + '/'
     pathlib.Path(folder_name).mkdir(parents=True)
-
     with open(folder_name + 'args.pkl', 'wb') as f:
         pickle.dump(args, f)
 
-    out = Parallel(n_jobs=-1)(delayed(experiment)(i, args)
-                              for i in range(args.n_exp))
-
-    scores = np.array([o[0] for o in out])
-    critic_loss = np.array([o[1] for o in out])
-
-    np.save(folder_name + 'scores.npy', scores)
-    np.save(folder_name + 'critic_loss_raw.npy', critic_loss)
+    Parallel(n_jobs=4)(delayed(experiment)(args, folder_name, i) for i in range(args.n_exp))
