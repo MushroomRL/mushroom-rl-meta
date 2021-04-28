@@ -194,12 +194,10 @@ def experiment(args, results_dir, seed):
         if n_epoch >= args.unfreeze_epoch > 0:
             agent.unfreeze_shared_weights()
 
-        print('- Learning:')
         # learning step
         core.learn(n_steps=evaluation_frequency,
                    n_steps_per_fit=1, quiet=args.quiet)
 
-        print('- Evaluation:')
         # evaluation step
         agent.policy.eval = True
         dataset = core.evaluate(n_steps=test_samples,
