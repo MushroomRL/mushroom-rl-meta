@@ -75,6 +75,8 @@ class MultitaskCore(object):
         for i in range(self._n_mdp):
             self.mdp[i].stop()
 
+        steps_progress_bar.close()
+
         return dataset
 
     def _step(self, i, render):

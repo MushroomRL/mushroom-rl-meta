@@ -223,7 +223,7 @@ class SharedDQN(Agent):
         return out_q
 
 
-class SharedDoubleDQN(DQN):
+class SharedDoubleDQN(SharedDQN):
     """
     Double DQN algorithm.
     "Deep Reinforcement Learning with Double Q-Learning".

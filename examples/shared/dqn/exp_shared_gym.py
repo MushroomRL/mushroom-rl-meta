@@ -1,7 +1,6 @@
 import argparse
 import datetime
 import pathlib
-import sys
 
 from joblib import delayed, Parallel
 import numpy as np
@@ -9,51 +8,40 @@ import torch.optim as optim
 
 import pickle
 
-sys.path.append('..')
-
+from mushroom_rl.environments import Gym, CarOnHill, CartPole, MDPInfo
+from mushroom_rl.core import Logger
 from mushroom_rl.approximators.parametric.torch_approximator import TorchApproximator
-from mushroom_rl.environments import *
-from mushroom_rl.utils.dataset import compute_metrics
+from mushroom_rl.utils.dataset import compute_J
 from mushroom_rl.utils.parameters import LinearParameter, Parameter
 
-from core import Core
-from dqn import DQN, DoubleDQN
-from policy import EpsGreedyMultiple
-from networks import AtariNetwork
+from mushroom_rl_meta.core import MultitaskCore
+from mushroom_rl_meta.algorithms import SharedDQN, SharedDoubleDQN
+from mushroom_rl_meta.replay_memory import PrioritizedReplayMemory
+from mushroom_rl_meta.policy import EpsGreedyMultiple
+
+from networks import GymNetwork
 from losses import LossFunction
-from replay_memory import PrioritizedReplayMemory
-
-"""
-This script runs Atari experiments with DQN as presented in:
-"Human-Level Control Through Deep Reinforcement Learning". Mnih V. et al.. 2015.
-
-"""
 
 
-def print_epoch(epoch):
-    print('################################################################')
-    print('Epoch: ', epoch)
-    print('----------------------------------------------------------------')
-
-
-def get_stats(dataset, idx, games):
-    score = compute_metrics(dataset)
-    print(games[idx] + ': min_reward: %f, max_reward: %f, mean_reward: %f,'
-          ' games_completed: %d' % score)
-
-    return score
-
-
-def experiment(args, idx):
-    np.random.seed()
+def experiment(args, results_dir, seed):
+    np.random.seed(seed)
 
     args.games = [''.join(g) for g in args.games]
 
     # MDP
     mdp = list()
+    gamma_eval = list()
     for i, g in enumerate(args.games):
-        mdp.append(Atari(g))
+        if g == 'pendulum':
+            mdp.append(CartPole(horizon=args.horizon[i], gamma=args.gamma[i]))
+        elif g == 'caronhill':
+            mdp.append(CarOnHill(horizon=args.horizon[i], gamma=args.gamma[i]))
+        else:
+            mdp.append(Gym(g, args.horizon[i], args.gamma[i]))
 
+        gamma_eval.append(args.gamma[i])
+
+    n_input_per_mdp = [m.info.observation_space.shape for m in mdp]
     n_actions_per_head = [(m.info.action_space.n,) for m in mdp]
 
     max_obs_dim = 0
@@ -99,8 +87,6 @@ def experiment(args, idx):
     else:
         raise ValueError
 
-    # DQN learning run
-
     # Settings
     if args.debug:
         initial_replay_size = args.batch_size
@@ -129,19 +115,17 @@ def experiment(args, idx):
                            n_actions_per_head=n_actions_per_head)
 
     # Approximator
+    input_shape = [m.info.observation_space.shape for m in mdp]
     n_games = len(args.games)
     loss = LossFunction(n_games, args.batch_size,
                         args.evaluation_frequency)
 
-    input_shape = (args.history_length, args.screen_height,
-                   args.screen_width)
     approximator_params = dict(
-        network=AtariNetwork,
+        network=GymNetwork,
         input_shape=input_shape,
         output_shape=(max(n_actions_per_head)[0],),
         n_actions=max(n_actions_per_head)[0],
         n_actions_per_head=n_actions_per_head,
-        n_games=len(args.games),
         optimizer=optimizer,
         loss=loss,
         use_cuda=args.use_cuda,
@@ -167,27 +151,33 @@ def experiment(args, idx):
         max_replay_size=max_replay_size,
         target_update_frequency=target_update_frequency // train_frequency,
         replay_memory=replay_memory,
+        n_input_per_mdp=n_input_per_mdp,
         n_actions_per_head=n_actions_per_head,
-        clip_reward=True,
-        history_length=args.history_length
+        clip_reward=False,
+        history_length=args.history_length,
+        dtype=np.float32
     )
 
     if args.algorithm == 'dqn':
-        agent = DQN(approximator, pi, mdp_info,
-                    approximator_params=approximator_params,
-                    **algorithm_params)
+        alg = SharedDQN
     elif args.algorithm == 'ddqn':
-        agent = DoubleDQN(approximator, pi, mdp_info,
-                          approximator_params=approximator_params,
-                          **algorithm_params)
+        alg = SharedDoubleDQN
+    else:
+        raise ValueError
+
+    agent = alg(approximator, pi, mdp_info,
+                approximator_params=approximator_params,
+                **algorithm_params)
 
     # Algorithm
-    core = Core(agent, mdp)
+    core = MultitaskCore(agent, mdp)
 
     # RUN
+    logger = Logger(alg.__name__, seed=seed, results_dir=results_dir)
+    logger.strong_line()
+    logger.info('Experiment Algorithm: ' + alg.__name__)
 
     # Fill replay memory with random dataset
-    print_epoch(0)
     pi.set_parameter(epsilon_random)
     core.learn(n_steps=initial_replay_size,
                n_steps_per_fit=initial_replay_size, quiet=args.quiet)
@@ -204,9 +194,14 @@ def experiment(args, idx):
     pi.set_parameter(epsilon_test)
     dataset = core.evaluate(n_steps=test_samples, render=args.render,
                             quiet=args.quiet)
+
+    results_dict = dict()
     for i in range(len(mdp)):
         d = dataset[i::len(mdp)]
-        scores[i].append(get_stats(d, i, args.games)[2])
+        current_score = np.mean(compute_J(d, gamma_eval[i]))
+        scores[i].append(current_score)
+        results_dict[args.games[i]] = current_score
+    logger.epoch_info(0, **results_dict)
 
     if args.unfreeze_epoch > 0:
         agent.freeze_shared_weights()
@@ -214,33 +209,32 @@ def experiment(args, idx):
     best_score_sum = -np.inf
     best_weights = None
 
-    np.save(folder_name + 'scores-exp-%d.npy' % idx, scores)
-    np.save(folder_name + 'loss-exp-%d.npy' % idx,
-            agent.approximator.model._loss.get_losses())
+    logger.log_numpy(J=scores, loss=agent.approximator.model._loss.get_losses())
 
     for n_epoch in range(1, max_steps // evaluation_frequency + 1):
         if n_epoch >= args.unfreeze_epoch > 0:
             agent.unfreeze_shared_weights()
 
-        print_epoch(n_epoch)
-        print('- Learning:')
         # learning step
         pi.set_parameter(None)
         core.learn(n_steps=evaluation_frequency,
                    n_steps_per_fit=train_frequency, quiet=args.quiet)
 
-        print('- Evaluation:')
         # evaluation step
         pi.set_parameter(epsilon_test)
         dataset = core.evaluate(n_steps=test_samples,
                                 render=args.render, quiet=args.quiet)
 
         current_score_sum = 0
+        results_dict = dict()
+
         for i in range(len(mdp)):
             d = dataset[i::len(mdp)]
-            current_score = get_stats(d, i, args.games)[2]
+            current_score = np.mean(compute_J(d, gamma_eval[i]))
             scores[i].append(current_score)
+            results_dict[args.games[i]] = current_score
             current_score_sum += current_score
+        logger.epoch_info(n_epoch, **results_dict)
 
         # Save shared weights if best score
         if args.save_shared and current_score_sum >= best_score_sum:
@@ -248,12 +242,9 @@ def experiment(args, idx):
             best_weights = agent.get_shared_weights()
 
         if args.save:
-            np.save(folder_name + 'weights-exp-%d-%d.npy' % (idx, n_epoch),
-                    agent.approximator.get_weights())
+            logger.log_numpy(weights=agent.approximator.get_weights())
 
-        np.save(folder_name + 'scores-exp-%d.npy' % idx, scores)
-        np.save(folder_name + 'loss-exp-%d.npy' % idx,
-                agent.approximator.model._loss.get_losses())
+        logger.log_numpy(J=scores, loss=agent.approximator.model._loss.get_losses())
 
     if args.save_shared:
         pickle.dump(best_weights, open(args.save_shared, 'wb'))
@@ -261,26 +252,23 @@ def experiment(args, idx):
     return scores, agent.approximator.model._loss.get_losses()
 
 
-if __name__ == '__main__':
-    # Argument parser
+def parse_arguments():
     parser = argparse.ArgumentParser()
 
     arg_game = parser.add_argument_group('Game')
     arg_game.add_argument("--games",
                           type=list,
                           nargs='+',
-                          default=['BreakoutNoFrameskip-v4'],
+                          default=['Acrobot-v1'],
                           help='Gym ID of the problem.')
-    arg_game.add_argument("--screen-width", type=int, default=84,
-                          help='Width of the game screen.')
-    arg_game.add_argument("--screen-height", type=int, default=84,
-                          help='Height of the game screen.')
+    arg_game.add_argument("--horizon", type=int, nargs='+')
+    arg_game.add_argument("--gamma", type=float, nargs='+')
     arg_game.add_argument("--n-exp", type=int)
 
     arg_mem = parser.add_argument_group('Replay Memory')
-    arg_mem.add_argument("--initial-replay-size", type=int, default=50000,
+    arg_mem.add_argument("--initial-replay-size", type=int, default=100,
                          help='Initial size of the replay memory.')
-    arg_mem.add_argument("--max-replay-size", type=int, default=500000,
+    arg_mem.add_argument("--max-replay-size", type=int, default=5000,
                          help='Max size of the replay memory.')
     arg_mem.add_argument("--prioritized", action='store_true',
                          help='Whether to use prioritized memory or not.')
@@ -293,7 +281,7 @@ if __name__ == '__main__':
                                   'rmspropcentered'],
                          default='adam',
                          help='Name of the optimizer to use to learn.')
-    arg_net.add_argument("--learning-rate", type=float, default=.00025,
+    arg_net.add_argument("--learning-rate", type=float, default=.001,
                          help='Learning rate value of the optimizer. Only used'
                               'in rmspropcentered')
     arg_net.add_argument("--decay", type=float, default=.95,
@@ -309,34 +297,34 @@ if __name__ == '__main__':
                               'DQN, ddqn is for Double DQN and adqn is for'
                               'Averaged DQN.')
     arg_alg.add_argument("--features", choices=['relu', 'sigmoid'])
-    arg_alg.add_argument("--batch-size", type=int, default=32,
+    arg_alg.add_argument("--batch-size", type=int, default=100,
                          help='Batch size for each fit of the network.')
-    arg_alg.add_argument("--history-length", type=int, default=4,
+    arg_alg.add_argument("--history-length", type=int, default=1,
                          help='Number of frames composing a state.')
-    arg_alg.add_argument("--target-update-frequency", type=int, default=10000,
+    arg_alg.add_argument("--target-update-frequency", type=int, default=100,
                          help='Number of collected samples before each update'
                               'of the target network.')
-    arg_alg.add_argument("--evaluation-frequency", type=int, default=250000,
+    arg_alg.add_argument("--evaluation-frequency", type=int, default=1000,
                          help='Number of learning step before each evaluation.'
                               'This number represents an epoch.')
-    arg_alg.add_argument("--train-frequency", type=int, default=4,
+    arg_alg.add_argument("--train-frequency", type=int, default=1,
                          help='Number of learning steps before each fit of the'
                               'neural network.')
-    arg_alg.add_argument("--max-steps", type=int, default=50000000,
+    arg_alg.add_argument("--max-steps", type=int, default=50000,
                          help='Total number of learning steps.')
-    arg_alg.add_argument("--final-exploration-frame", type=int, default=1000000,
+    arg_alg.add_argument("--final-exploration-frame", type=int, default=5000,
                          help='Number of steps until the exploration rate stops'
                               'decreasing.')
     arg_alg.add_argument("--initial-exploration-rate", type=float, default=1.,
                          help='Initial value of the exploration rate.')
-    arg_alg.add_argument("--final-exploration-rate", type=float, default=.1,
+    arg_alg.add_argument("--final-exploration-rate", type=float, default=.01,
                          help='Final value of the exploration rate. When it'
                               'reaches this values, it stays constant.')
-    arg_alg.add_argument("--test-exploration-rate", type=float, default=.05,
+    arg_alg.add_argument("--test-exploration-rate", type=float, default=0.,
                          help='Exploration rate used during evaluation.')
-    arg_alg.add_argument("--test-samples", type=int, default=125000,
+    arg_alg.add_argument("--test-samples", type=int, default=2000,
                          help='Number of steps for each evaluation.')
-    arg_alg.add_argument("--max-no-op-actions", type=int, default=30,
+    arg_alg.add_argument("--max-no-op-actions", type=int, default=0,
                          help='Maximum number of no-op action performed at the'
                               'beginning of the episodes. The minimum number is'
                               'history_length.')
@@ -367,6 +355,13 @@ if __name__ == '__main__':
                            help='Flag used to add a postfix to the folder name')
 
     args = parser.parse_args()
+    
+    return args
+
+
+if __name__ == '__main__':
+    # Argument parser
+    args = parse_arguments()
 
     folder_name = './logs/gym_' + datetime.datetime.now().strftime(
         '%Y-%m-%d_%H-%M-%S') + args.postfix + '/'
@@ -374,8 +369,8 @@ if __name__ == '__main__':
     with open(folder_name + 'args.pkl', 'wb') as f:
         pickle.dump(args, f)
 
-    out = Parallel(n_jobs=-1)(delayed(experiment)(args, i)
-                              for i in range(args.n_exp))
+    out = Parallel(n_jobs=1)(delayed(experiment)(args, folder_name, i)
+                             for i in range(args.n_exp))
 
     scores = np.array([o[0] for o in out])
     loss = np.array([o[1] for o in out])

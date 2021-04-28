@@ -19,7 +19,7 @@ class LossFunction(object):
         return self._reg_losses
 
     def __call__(self, yhat, y, reduction='mean'):
-        loss = F.smooth_l1_loss(yhat, y, reduce=False)
+        loss = F.smooth_l1_loss(yhat, y, reduction='none')
 
         if self._need_log():
             temp_losses = list()
@@ -31,9 +31,9 @@ class LossFunction(object):
 
             self._losses.append(temp_losses)
 
-        if reduction is 'none':
+        if reduction == 'none':
             return loss
-        elif reduction is 'mean':
+        elif reduction == 'mean':
             return loss.mean()
         else:
             raise NotImplementedError

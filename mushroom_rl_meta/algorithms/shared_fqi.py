@@ -1,6 +1,6 @@
 import numpy as np
 
-from mushroom.algorithms.value.batch_td import BatchTD
+from mushroom_rl.algorithms.value.batch_td import BatchTD
 
 
 
