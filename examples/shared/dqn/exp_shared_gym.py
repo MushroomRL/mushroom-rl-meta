@@ -16,7 +16,7 @@ from mushroom_rl.utils.parameters import LinearParameter, Parameter
 
 from mushroom_rl_meta.core import MultitaskCore
 from mushroom_rl_meta.algorithms import SharedDQN, SharedDoubleDQN
-from mushroom_rl_meta.replay_memory import PrioritizedReplayMemory
+from mushroom_rl_meta.replay_memory import PrioritizedReplayMemoryMulty
 from mushroom_rl_meta.policy import EpsGreedyMultiple
 
 from networks import GymNetwork
@@ -131,7 +131,7 @@ def experiment(args, results_dir, seed):
     approximator = TorchApproximator
 
     if args.prioritized:
-        replay_memory = [PrioritizedReplayMemory(
+        replay_memory = [PrioritizedReplayMemoryMulty(
             initial_replay_size, max_replay_size, alpha=.6,
             beta=LinearParameter(.4, threshold_value=1,
                                  n=max_steps // train_frequency)
@@ -221,9 +221,7 @@ def experiment(args, results_dir, seed):
         dataset = core.evaluate(n_steps=test_samples,
                                 render=args.render, quiet=args.quiet)
 
-        current_score_sum = 0
         results_dict = dict()
-
         current_score = np.zeros(len(mdp))
         for i in range(len(mdp)):
             d = dataset[i::len(mdp)]
@@ -238,7 +236,7 @@ def experiment(args, results_dir, seed):
             best_weights = agent.get_shared_weights()
 
         if args.save:
-            logger.log_numpy(weights=agent.approximator.get_weights())
+            logger.log_agent(agent)
 
         logger.log_numpy(J=current_score, loss=agent.approximator.model._loss.get_losses())
 

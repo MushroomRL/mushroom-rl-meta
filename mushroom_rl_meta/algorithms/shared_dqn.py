@@ -1,13 +1,10 @@
 from copy import deepcopy
 
-import torch.nn as nn
-import torch.nn.functional as F
-
 from mushroom_rl.algorithms.agent import Agent
 from mushroom_rl.approximators.regressor import Regressor
 from mushroom_rl.approximators.parametric.torch_approximator import *
 
-from mushroom_rl_meta.replay_memory import PrioritizedReplayMemory, ReplayMemory
+from mushroom_rl_meta.replay_memory import PrioritizedReplayMemoryMulty, ReplayMemoryMulty
 
 
 class SharedDQN(Agent):
@@ -25,6 +22,7 @@ class SharedDQN(Agent):
                  dtype=np.uint8):
         self._fit_params = dict() if fit_params is None else fit_params
 
+        self._dtype = dtype
         self._batch_size = batch_size
         self._n_games = n_games
         self._clip_reward = clip_reward
@@ -40,12 +38,12 @@ class SharedDQN(Agent):
 
         if replay_memory is not None:
             self._replay_memory = replay_memory
-            if isinstance(replay_memory[0], PrioritizedReplayMemory):
+            if isinstance(replay_memory[0], PrioritizedReplayMemoryMulty):
                 self._fit = self._fit_prioritized
             else:
                 self._fit = self._fit_standard
         else:
-            self._replay_memory = [ReplayMemory(
+            self._replay_memory = [ReplayMemoryMulty(
                 initial_replay_size, max_replay_size) for _ in range(self._n_games)
             ]
             self._fit = self._fit_standard
@@ -64,24 +62,24 @@ class SharedDQN(Agent):
 
         super().__init__(mdp_info, policy)
 
-        n_samples = self._batch_size * self._n_games
-        self._state_idxs = np.zeros(n_samples, dtype=np.int)
-        self._state = np.zeros(
-            ((n_samples,
-             self._history_length) + self.mdp_info.observation_space.shape),
-            dtype=dtype
-        ).squeeze()
-        self._action = np.zeros((n_samples, 1), dtype=np.int)
-        self._reward = np.zeros(n_samples)
-        self._next_state_idxs = np.zeros(n_samples, dtype=np.int)
-        self._next_state = np.zeros(
-            ((n_samples,
-             self._history_length) + self.mdp_info.observation_space.shape),
-            dtype=dtype
-        ).squeeze()
-        self._absorbing = np.zeros(n_samples)
-        self._idxs = np.zeros(n_samples, dtype=np.int)
-        self._is_weight = np.zeros(n_samples)
+        self._allocate_memory()
+
+        self._add_save_attr(
+            _fit_params='pickle',
+            _dtype='primitive',
+            _batch_size='primitive',
+            _n_games='primitive',
+            _clip_reward='primitive',
+            _n_input_per_mdp='primitive',
+            _n_action_per_head='primitive',
+            _history_length='primitive',
+            _max_actions='primitive',
+            _target_update_frequency='primitive',
+            _replay_memory='mushroom',
+            _n_updates='primitive',
+            approximator='mushroom',
+            target_approximator='mushroom'
+        )
 
     def fit(self, dataset):
         self._fit(dataset)
@@ -196,6 +194,26 @@ class SharedDQN(Agent):
     def unfreeze_shared_weights(self):
         self.approximator.model.network.unfreeze_shared_weights()
 
+    def _allocate_memory(self):
+        n_samples = self._batch_size * self._n_games
+        self._state_idxs = np.zeros(n_samples, dtype=np.int)
+        self._state = np.zeros(
+            ((n_samples,
+              self._history_length) + self.mdp_info.observation_space.shape),
+            dtype=self._dtype
+        ).squeeze()
+        self._action = np.zeros((n_samples, 1), dtype=np.int)
+        self._reward = np.zeros(n_samples)
+        self._next_state_idxs = np.zeros(n_samples, dtype=np.int)
+        self._next_state = np.zeros(
+            ((n_samples,
+              self._history_length) + self.mdp_info.observation_space.shape),
+            dtype=self._dtype
+        ).squeeze()
+        self._absorbing = np.zeros(n_samples)
+        self._idxs = np.zeros(n_samples, dtype=np.int)
+        self._is_weight = np.zeros(n_samples)
+
     def _update_target(self):
         """
         Update the target network.
@@ -221,6 +239,16 @@ class SharedDQN(Agent):
             out_q[start:stop] *= self.mdp_info.gamma[i]
 
         return out_q
+
+    def _post_load(self):
+        if isinstance(self._replay_memory, PrioritizedReplayMemoryMulty):
+            self._fit = self._fit_prioritized
+        else:
+            self._fit = self._fit_standard
+
+        self.policy.set_q(self.approximator)
+
+        self._allocate_memory()
 
 
 class SharedDoubleDQN(SharedDQN):

@@ -6,7 +6,7 @@ import torch.nn as nn
 from mushroom_rl.algorithms import Agent
 from mushroom_rl.approximators import Regressor
 
-from mushroom_rl_meta.replay_memory import ReplayMemory
+from mushroom_rl_meta.replay_memory import ReplayMemoryMulty
 
 
 class ActorLoss(nn.Module):
@@ -29,6 +29,7 @@ class SharedDDPG(Agent):
                  tau, actor_params, critic_params, policy_params,
                  n_actions_per_head, history_length=1, n_input_per_mdp=None,
                  n_games=1, dtype=np.uint8):
+        self._dtype = dtype
         self._batch_size = batch_size
         self._n_games = n_games
         if n_input_per_mdp is None:
@@ -42,8 +43,8 @@ class SharedDDPG(Agent):
         self._tau = tau
 
         self._replay_memory = [
-            ReplayMemory(initial_replay_size,
-                         max_replay_size) for _ in range(self._n_games)
+            ReplayMemoryMulty(initial_replay_size,
+                              max_replay_size) for _ in range(self._n_games)
         ]
 
         self._n_updates = 0
@@ -73,22 +74,24 @@ class SharedDDPG(Agent):
 
         super().__init__(mdp_info, policy)
 
-        n_samples = self._batch_size * self._n_games
-        self._state_idxs = np.zeros(n_samples, dtype=np.int)
-        self._state = np.zeros(
-            ((n_samples,
-             self._history_length) + self.mdp_info.observation_space.shape),
-            dtype=dtype
-        ).squeeze()
-        self._action = np.zeros((n_samples, self._max_actions))
-        self._reward = np.zeros(n_samples)
-        self._next_state_idxs = np.zeros(n_samples, dtype=np.int)
-        self._next_state = np.zeros(
-            ((n_samples,
-             self._history_length) + self.mdp_info.observation_space.shape),
-            dtype=dtype
-        ).squeeze()
-        self._absorbing = np.zeros(n_samples)
+        self._allocate_memory()
+
+        self._add_save_attr(
+            _dtype='primitive',
+            _batch_size='primitive',
+            _n_games='primitive',
+            _n_input_per_mdp='primitive',
+            _n_action_per_head='primitive',
+            _history_length='primitive',
+            _tau='primitive',
+            _max_actions='primitive',
+            _replay_memory='mushroom',
+            _n_updates='primitive',
+            _critic_approximator='mushroom',
+            _target_critic_approximator='mushroom',
+            _actor_approximator='mushroom',
+            _target_actor_approximator='mushroom',
+        )
 
     def fit(self, dataset):
         s = np.array([d[0][0] for d in dataset]).ravel()
@@ -151,6 +154,24 @@ class SharedDDPG(Agent):
         self._critic_approximator.model.network.unfreeze_shared_weights()
         self._actor_approximator.model.network.unfreeze_shared_weights()
 
+    def _allocate_memory(self):
+        n_samples = self._batch_size * self._n_games
+        self._state_idxs = np.zeros(n_samples, dtype=np.int)
+        self._state = np.zeros(
+            ((n_samples,
+             self._history_length) + self.mdp_info.observation_space.shape),
+            dtype=self._dtype
+        ).squeeze()
+        self._action = np.zeros((n_samples, self._max_actions))
+        self._reward = np.zeros(n_samples)
+        self._next_state_idxs = np.zeros(n_samples, dtype=np.int)
+        self._next_state = np.zeros(
+            ((n_samples,
+             self._history_length) + self.mdp_info.observation_space.shape),
+            dtype=self._dtype
+        ).squeeze()
+        self._absorbing = np.zeros(n_samples)
+
     def _update_target(self):
         """
         Update the target networks.
@@ -182,3 +203,7 @@ class SharedDDPG(Agent):
                 )
 
         return out_q
+
+    def _post_load(self):
+        self._actor_approximator = self.policy._approximator
+        self._allocate_memory()

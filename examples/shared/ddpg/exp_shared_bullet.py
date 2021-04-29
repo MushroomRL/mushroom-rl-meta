@@ -220,7 +220,7 @@ def experiment(args, results_dir, seed):
             best_weights = agent.get_shared_weights()
 
         if args.save:
-            logger.log_numpy(weights=agent.policy.get_weights())
+            logger.log_agent(agent)
 
         logger.log_numpy(J=current_score, critic_loss=agent._critic_approximator.model._loss.get_losses())
 

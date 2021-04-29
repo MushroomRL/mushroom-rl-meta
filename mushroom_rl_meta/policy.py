@@ -23,6 +23,12 @@ class Multiple(TDPolicy):
             self._explorative_pars = [deepcopy(parameter) for _ in range(n_heads)]
         self._pars = [None] * n_heads
 
+        self._add_save_attr(
+            _n_actions_per_head='primitive',
+            _pars='mushroom',
+            _explorative_pars='mushroom'
+        )
+
     def set_parameter(self, parameter):
         assert isinstance(parameter, Parameter) or parameter is None
 
@@ -47,17 +53,17 @@ class EpsGreedyMultiple(Multiple):
             idx=idx).ravel()[:self._n_actions_per_head[idx][0]]
         max_a = np.argwhere(q == np.max(q)).ravel()
 
-        p = self._epsilon.get_value(state) / self._n_actions_per_head[idx][0]
+        p = self._pars[idx].get_value(state) / self._n_actions_per_head[idx][0]
 
         if len(args) == 2:
             action = args[1]
             if action in max_a:
-                return p + (1. - self._epsilon.get_value(state)) / len(max_a)
+                return p + (1. - self._pars[idx].get_value(state)) / len(max_a)
             else:
                 return p
         else:
             probs = np.ones(self._n_actions_per_head[idx][0]) * p
-            probs[max_a] += (1. - self._epsilon.get_value(state)) / len(max_a)
+            probs[max_a] += (1. - self._pars[idx].get_value(state)) / len(max_a)
 
             return probs
 
@@ -93,8 +99,24 @@ class OrnsteinUhlenbeckPolicyMultiple(ParametricPolicy):
         self._n_games = len(n_actions_per_head)
 
         self._n_actions_per_head = n_actions_per_head
+        self._x_prev = None
 
         self.eval = None
+
+        self.reset()
+
+        self._add_save_attr(
+            eval='primitive',
+            _approximator='mushroom',
+            _sigma='numpy',
+            _theta='primitive',
+            _dt='primitive',
+            _max_action_value='primitive',
+            _n_games='primitive',
+            _n_actions_per_head='primitive',
+            _x0='numpy',
+            _x_prev='numpy'
+        )
 
     def __call__(self, state, action):
         raise NotImplementedError

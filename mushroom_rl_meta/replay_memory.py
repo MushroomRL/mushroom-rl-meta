@@ -3,7 +3,7 @@ import numpy as np
 from mushroom_rl.utils.replay_memory import PrioritizedReplayMemory, ReplayMemory, SumTree
 
 
-class ReplayMemory(ReplayMemory):
+class ReplayMemoryMulty(ReplayMemory):
     def add(self, dataset):
         for i in range(len(dataset)):
             self._states[self._idx] = dataset[i][0][1]
@@ -19,16 +19,10 @@ class ReplayMemory(ReplayMemory):
                 self._idx = 0
 
 
-class PrioritizedReplayMemory(PrioritizedReplayMemory):
+class PrioritizedReplayMemoryMulty(PrioritizedReplayMemory):
     def __init__(self, initial_size, max_size, alpha, beta,
                  epsilon=.01):
-        self._initial_size = initial_size
-        self._max_size = max_size
-        self._alpha = alpha
-        self._beta = beta
-        self._epsilon = epsilon
-
-        self._tree = SumTree(max_size)
+        super().__init__(initial_size, max_size, alpha, beta, epsilon)
 
     def get(self, n_samples):
         states = [None for _ in range(n_samples)]
