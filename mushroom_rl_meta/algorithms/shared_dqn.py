@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from mushroom_rl.algorithms.agent import Agent
+from mushroom_rl.core.agent import Agent
 from mushroom_rl.approximators.regressor import Regressor
 from mushroom_rl.approximators.parametric.torch_approximator import *
 

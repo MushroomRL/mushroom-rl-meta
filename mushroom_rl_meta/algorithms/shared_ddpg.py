@@ -3,7 +3,7 @@ from copy import deepcopy
 import numpy as np
 
 import torch.nn as nn
-from mushroom_rl.algorithms import Agent
+from mushroom_rl.core import Agent
 from mushroom_rl.approximators import Regressor
 
 from mushroom_rl_meta.replay_memory import ReplayMemoryMulty
